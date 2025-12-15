@@ -20,6 +20,9 @@ load_dotenv()
 # Get password from environment
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "aimagna")
 
+# Debug: Log password info on startup (masked for security)
+print(f"🔐 APP_PASSWORD configured: {'✅ from env' if 'APP_PASSWORD' in os.environ else '⚠️ using default'} (length: {len(APP_PASSWORD)})")
+
 # =============================================================================
 # LOGIN PAGE HTML
 # =============================================================================
