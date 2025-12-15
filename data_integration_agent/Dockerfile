@@ -1,10 +1,10 @@
 # =============================================================================
 # LLL Data Integration Agent - Dockerfile
 # =============================================================================
-# Compact multi-stage build using latest Python 3.13
+# Compact multi-stage build using Python 3.12 (stable with ADK)
 # =============================================================================
 
-FROM python:3.13-slim-bookworm AS builder
+FROM python:3.12-slim-bookworm AS builder
 
 WORKDIR /build
 
@@ -19,10 +19,7 @@ RUN pip wheel --no-cache-dir --wheel-dir=/wheels -r requirements.txt
 # Production image
 # =============================================================================
 
-FROM python:3.13-slim-bookworm
-
-# Security: Run as non-root user
-RUN useradd --create-home --shell /bin/bash appuser
+FROM python:3.12-slim-bookworm
 
 WORKDIR /app
 
@@ -34,10 +31,7 @@ RUN pip install --no-cache-dir /wheels/* && rm -rf /wheels
 COPY . .
 
 # Create logs directory
-RUN mkdir -p /app/logs && chown -R appuser:appuser /app
-
-# Switch to non-root user
-USER appuser
+RUN mkdir -p /app/logs
 
 # Environment variables (overridden by Secret Manager in Cloud Run)
 ENV PORT=8080 \
@@ -46,9 +40,5 @@ ENV PORT=8080 \
 
 EXPOSE 8080
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/')" || exit 1
-
-# Run the server
-CMD ["python", "-m", "uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8080"]
+# Run the server - use $PORT environment variable
+CMD ["sh", "-c", "python -m uvicorn server:app --host 0.0.0.0 --port $PORT"]
