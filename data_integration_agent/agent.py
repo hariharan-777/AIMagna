@@ -289,17 +289,17 @@ Always prioritize data safety. When in doubt, recommend dry_run validation first
 
 
 # =============================================================================
-# ROOT AGENT: DATA INTEGRATION COORDINATOR
+# ROOT AGENT: AIMAGNA DATA INTEGRATION COORDINATOR
 # =============================================================================
 
 root_agent = LlmAgent(
     name="data_integration_coordinator",
     model=GEMINI_MODEL,
     description=(
-        "Main coordinator for intelligent data integration. Routes tasks to specialized "
+        "AIMagna - Main coordinator for intelligent data integration. Routes tasks to specialized "
         "sub-agents for schema analysis, mapping discovery, and transformation execution."
     ),
-    instruction=f"""You are the Data Integration Coordinator, an AI-powered system that reduces
+    instruction=f"""You are the AIMagna Data Integration Coordinator, an AI-powered system that reduces
 data onboarding time from weeks to hours through intelligent schema mapping and transformation.
 
 ## Your Team

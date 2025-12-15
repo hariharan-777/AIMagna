@@ -18,7 +18,7 @@ import uvicorn
 load_dotenv()
 
 # Get password from environment
-APP_PASSWORD = os.environ.get("APP_PASSWORD", "aimagna@2025")
+APP_PASSWORD = os.environ.get("APP_PASSWORD", "aimagna")
 
 # =============================================================================
 # LOGIN PAGE HTML
@@ -30,7 +30,7 @@ LOGIN_HTML = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LLL Data Integration - Login</title>
+    <title>AIMagna: Multi Agent Data Integration Demo - Login</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
@@ -114,8 +114,8 @@ LOGIN_HTML = """
 <body>
     <div class="login-container">
         <div class="logo">
-            <h1>🔐 LLL Data Integration</h1>
-            <p>AI-Powered Schema Mapping System</p>
+            <h1>🔐 AIMagna</h1>
+            <p>Multi Agent Data Integration Demo</p>
         </div>
         <div class="error" id="error">Invalid password. Please try again.</div>
         <form id="loginForm">
@@ -256,7 +256,7 @@ async def lifespan(app: FastAPI):
 # FASTAPI APP
 # =============================================================================
 
-app = FastAPI(title="LLL Data Integration Agent", lifespan=lifespan)
+app = FastAPI(title="AIMagna: Multi Agent Data Integration Demo", lifespan=lifespan)
 
 # Add auth middleware
 app.add_middleware(AuthMiddleware)

@@ -1,4 +1,4 @@
-# LLL: Multi-Agent Workflow for Intelligent Data Integration
+# AIMagna: Multi Agent Data Integration Demo
 
 > **AI-powered data integration that reduces onboarding from weeks to hours**
 
@@ -21,7 +21,7 @@ Enterprise data integration remains one of the most time-consuming challenges in
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                        LLL Data Integration System                       │
+│                     AIMagna Data Integration System                      │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                          │
 │  ┌────────────────────────────────────────────────────────────────────┐ │
@@ -335,5 +335,6 @@ This project is licensed under the Apache License 2.0 - see the LICENSE file for
 ---
 
 **Built with ❤️ using Google ADK, Gemini, and BigQuery**
- 
+
+ 
  
