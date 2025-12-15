@@ -24,6 +24,7 @@ This module provides tools with:
 
 import os
 import json
+import glob
 from datetime import datetime
 from typing import Optional
 from google.adk.tools import FunctionTool
@@ -402,6 +403,9 @@ def suggest_column_mappings(
     suggested_mappings = tool_context.state.get("suggested_mappings", {})
     suggested_mappings[f"{source_table}_to_{target_table}"] = result
     tool_context.state["suggested_mappings"] = suggested_mappings
+
+    # Track most recent suggestion for simpler follow-up approvals
+    tool_context.state["last_suggested_mapping_key"] = f"{source_table}_to_{target_table}"
     
     return result
 
@@ -432,15 +436,15 @@ def _similar_names(name1: str, name2: str) -> bool:
 # =============================================================================
 
 def approve_mappings(
-    source_table: str,
-    target_table: str,
-    tool_context: ToolContext
+    source_table: str | None = None,
+    target_table: str | None = None,
+    decision: str = "approve",
+    tool_context: ToolContext = None
 ) -> dict:
     """Requests human approval for suggested column mappings.
 
-    Uses ADK's request_confirmation; if the UI does not surface a prompt
-    (e.g., headless/batch run), we auto-approve with a warning to avoid
-    a stuck workflow in dev environments.
+    This tool is intentionally text-driven (no UI confirmation dependency).
+    The agent should ask the user to reply with "approve" or "reject".
 
     Args:
         source_table: Name of the source table.
@@ -450,7 +454,34 @@ def approve_mappings(
         Dictionary containing approval status and final mappings.
     """
     suggested_mappings = tool_context.state.get("suggested_mappings", {})
-    mapping_key = f"{source_table}_to_{target_table}"
+
+    # Allow approving the most recent suggestion without repeating table names.
+    if not source_table or not target_table:
+        mapping_key = tool_context.state.get("last_suggested_mapping_key")
+        if not mapping_key:
+            return {
+                "error": "No source/target provided and no prior suggested mapping found. Run suggest_column_mappings first.",
+            }
+        try:
+            source_table, target_table = mapping_key.split("_to_", 1)
+        except ValueError:
+            return {
+                "error": "Could not infer source/target from last suggested mapping. Please provide source_table and target_table explicitly.",
+            }
+    else:
+        mapping_key = f"{source_table}_to_{target_table}"
+
+    normalized = (decision or "").strip().lower()
+    if any(word in normalized for word in ["reject", "rejected", "no", "decline", "deny"]):
+        final_decision = "rejected"
+    elif any(word in normalized for word in ["approve", "approved", "yes", "accept", "ok"]):
+        final_decision = "approved"
+    else:
+        return {
+            "error": "Invalid decision. Reply with 'approve' or 'reject'.",
+            "source_table": source_table,
+            "target_table": target_table,
+        }
     
     if mapping_key not in suggested_mappings:
         return {
@@ -470,83 +501,64 @@ def approve_mappings(
         }
     )
 
-    # Ask for confirmation; if None (no UI) we auto-approve in dev to avoid blocking
-    approved = tool_context.request_confirmation(
-        hint=(
-            "Review the proposed column mappings. Approve to proceed with SQL generation, "
-            "or reject to modify mappings."
-        ),
-        payload={
-            "title": f"Column Mapping Approval: {source_table} → {target_table}",
-            "summary": {
-                "total_columns": len(mapping_data["mappings"]),
-                "mapped": mapping_data["mapping_count"],
-                "unmapped": mapping_data["unmapped_count"],
-                "avg_confidence": f"{mapping_data['average_confidence']*100:.0f}%"
-            },
-            "risk_assessment": {
-                "risk_level": risk_assessment["risk_level"],
-                "risk_factors": risk_assessment["risk_factors"],
-                "mitigations": risk_assessment["mitigations"],
-                "recommendation": risk_assessment["recommendation"]
-            },
-            "confidence_analysis": mapping_data.get("confidence_analysis", {}),
-            "mappings": mapping_data.get("mappings", []),
-            "explanations": mapping_data.get("explanations", [])
-        }
-    )
+    if final_decision == "approved":
+        # Store approved mappings in state
+        approved_mappings = tool_context.state.get("approved_mappings", {})
+        approved_mappings[mapping_key] = mapping_data
+        tool_context.state["approved_mappings"] = approved_mappings
 
-    # Handle explicit rejection
-    if approved is False:
         log_audit_event(
             "MAPPING",
-            "MAPPINGS_REJECTED",
+            "MAPPINGS_APPROVED",
             {
                 "source_table": source_table,
-                "target_table": target_table
+                "target_table": target_table,
+                "mapping_count": mapping_data["mapping_count"],
+                "avg_confidence": mapping_data["average_confidence"]
             },
             risk_level="LOW"
         )
+
         return {
-            "status": "rejected",
+            "status": "approved",
             "source_table": source_table,
             "target_table": target_table,
-            "message": "Mappings rejected. Provide feedback to refine suggestions.",
-            "audit_trail": f"Rejected at {datetime.utcnow().isoformat()}"
+            "mapping_count": mapping_data["mapping_count"],
+            "unmapped_count": mapping_data["unmapped_count"],
+            "average_confidence": f"{mapping_data['average_confidence']*100:.0f}%",
+            "risk_level": risk_assessment["risk_level"],
+            "message": "✅ Mappings approved! Ready to generate transformation SQL.",
+            "next_step": "Use generate_transformation_sql to create the SQL transformation.",
+            "audit_trail": f"Approved at {datetime.utcnow().isoformat()}"
         }
 
-    # If approved is True or None (no UI), treat as approved to avoid blocking
-    auto_approved = approved is None
-    approved_mappings = tool_context.state.get("approved_mappings", {})
-    approved_mappings[mapping_key] = mapping_data
-    tool_context.state["approved_mappings"] = approved_mappings
+    # Rejected path
+    rejected_mappings = tool_context.state.get("rejected_mappings", {})
+    rejected_mappings[mapping_key] = mapping_data
+    tool_context.state["rejected_mappings"] = rejected_mappings
 
     log_audit_event(
         "MAPPING",
-        "MAPPINGS_APPROVED",
+        "MAPPINGS_REJECTED",
         {
             "source_table": source_table,
             "target_table": target_table,
             "mapping_count": mapping_data["mapping_count"],
-            "avg_confidence": mapping_data["average_confidence"],
-            "auto_approved": auto_approved
+            "avg_confidence": mapping_data["average_confidence"]
         },
         risk_level="LOW"
     )
 
-    approval_note = "(auto-approved in dev: no confirmation UI detected)" if auto_approved else ""
-
     return {
-        "status": "approved",
+        "status": "rejected",
         "source_table": source_table,
         "target_table": target_table,
         "mapping_count": mapping_data["mapping_count"],
         "unmapped_count": mapping_data["unmapped_count"],
         "average_confidence": f"{mapping_data['average_confidence']*100:.0f}%",
         "risk_level": risk_assessment["risk_level"],
-        "message": "✅ Mappings approved! Ready to generate transformation SQL.",
-        "next_step": "Use generate_transformation_sql to create the SQL transformation.",
-        "audit_trail": f"Approved at {datetime.utcnow().isoformat()} {approval_note}".strip()
+        "message": "❌ Mappings rejected. Tell me what to change (columns, naming, transformations), and I’ll regenerate suggestions.",
+        "audit_trail": f"Rejected at {datetime.utcnow().isoformat()}"
     }
 
 
@@ -694,6 +706,7 @@ def execute_transformation(
     source_table: str,
     target_table: str,
     dry_run: bool = True,
+    execution_token: str | None = None,
     tool_context: ToolContext = None
 ) -> dict:
     """Executes the generated transformation SQL against BigQuery.
@@ -728,6 +741,13 @@ def execute_transformation(
         query_job = client.query(sql, job_config=job_config)
         
         if dry_run:
+            # Create a short-lived execution token for explicit user confirmation.
+            import secrets
+            tokens = tool_context.state.get("execution_tokens", {})
+            token = secrets.token_hex(4).upper()
+            tokens[mapping_key] = token
+            tool_context.state["execution_tokens"] = tokens
+
             # Audit log validation
             log_audit_event(
                 "SQL_EXECUTION",
@@ -746,10 +766,34 @@ def execute_transformation(
                 "source_table": source_table,
                 "target_table": target_table,
                 "bytes_processed": query_job.total_bytes_processed,
-                "message": "SQL validated successfully. Set dry_run=False to execute.",
+                "message": "SQL validated successfully. To execute, reply with the execution token.",
+                "execution_token": token,
                 "risk_note": "Dry run completed - no data was modified"
             }
         else:
+            tokens = tool_context.state.get("execution_tokens", {})
+            expected = tokens.get(mapping_key)
+            provided = (execution_token or "").strip().upper()
+            if not expected:
+                return {
+                    "status": "blocked",
+                    "source_table": source_table,
+                    "target_table": target_table,
+                    "error": "No execution token found. Run execute_transformation with dry_run=True first.",
+                }
+            if provided != expected:
+                return {
+                    "status": "blocked",
+                    "source_table": source_table,
+                    "target_table": target_table,
+                    "error": "Execution blocked. Invalid or missing execution_token.",
+                    "hint": "Run dry_run=True to get a token, then call again with dry_run=False and execution_token=<token>.",
+                }
+
+            # Invalidate token after successful confirmation
+            tokens.pop(mapping_key, None)
+            tool_context.state["execution_tokens"] = tokens
+
             # Wait for job completion
             query_job.result()
             
@@ -799,8 +843,139 @@ def execute_transformation(
 
 
 # =============================================================================
+# AUDIT LOG TOOLS
+# =============================================================================
+
+def get_audit_logs(
+    limit: int = 50,
+    date_yyyymmdd: str | None = None,
+    tool_context: ToolContext = None,
+) -> dict:
+    """Return recent audit log events.
+
+    Notes:
+    - Audit logs are written by `log_audit_event` in `guardrails.py`.
+    - In Docker, `AUDIT_LOG_DIR` is typically `/tmp/audit_logs`.
+    - Log lines look like: "<timestamp> | INFO | {json}".
+
+    Args:
+        limit: Max number of most recent events to return.
+        date_yyyymmdd: Optional specific date (e.g. "20251216"). If omitted, uses latest audit_*.log file.
+
+    Returns:
+        Dictionary with file metadata and parsed events.
+    """
+    try:
+        limit = int(limit)
+    except Exception:
+        limit = 50
+    limit = max(1, min(limit, 500))
+
+    log_dir = os.environ.get("AUDIT_LOG_DIR", "./logs")
+    pattern = (
+        os.path.join(log_dir, f"audit_{date_yyyymmdd}.log")
+        if date_yyyymmdd
+        else os.path.join(log_dir, "audit_*.log")
+    )
+    candidates = sorted(glob.glob(pattern))
+    if not candidates:
+        return {
+            "status": "empty",
+            "log_dir": log_dir,
+            "pattern": pattern,
+            "message": "No audit log files found yet. Trigger an action (schema read, mapping, SQL validation/execution) to generate audit events.",
+        }
+
+    log_file = candidates[-1]
+    try:
+        with open(log_file, "r", encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except Exception as e:
+        return {
+            "status": "error",
+            "log_dir": log_dir,
+            "file": log_file,
+            "error": str(e),
+        }
+
+    recent = lines[-limit:]
+    events = []
+    for line in recent:
+        # Expected format: "<ts> | <level> | <json>"
+        parts = line.split(" | ", 2)
+        if len(parts) == 3:
+            ts, level, payload = parts
+            try:
+                record = json.loads(payload)
+                events.append({"ts": ts, "level": level, "record": record})
+            except Exception:
+                events.append({"ts": ts, "level": level, "raw": payload})
+        else:
+            events.append({"raw": line})
+
+    return {
+        "status": "ok",
+        "log_dir": log_dir,
+        "file": log_file,
+        "returned": len(events),
+        "events": events,
+    }
+
+
+# =============================================================================
 # TOOL EXPORTS
 # =============================================================================
+
+def _create_function_tool_compat(
+    *,
+    func,
+    require_confirmation: bool = False,
+    confirmation_prompt: str | None = None,
+):
+    """Create a FunctionTool with best-effort confirmation prompt support.
+
+    Some `google-adk` versions support `confirmation_prompt` in `FunctionTool.__init__`,
+    others do not. Passing an unknown kwarg prevents the agent module from loading.
+
+    Strategy:
+    - Prefer native `confirmation_prompt` when supported.
+    - Otherwise, fall back to:
+      * creating the tool without that kwarg
+      * embedding the prompt into the tool's description (via docstring)
+      * attaching `confirmation_prompt` as an attribute for any custom UI.
+    """
+    tool_kwargs = {
+        "func": func,
+        "require_confirmation": require_confirmation,
+    }
+
+    if confirmation_prompt:
+        tool_kwargs["confirmation_prompt"] = confirmation_prompt
+
+    try:
+        return FunctionTool(**tool_kwargs)
+    except TypeError as e:
+        # Back-compat for ADK versions that don't accept `confirmation_prompt`.
+        if confirmation_prompt and "confirmation_prompt" in str(e):
+            import functools
+
+            @functools.wraps(func)
+            def _wrapped(*args, **kwargs):
+                return func(*args, **kwargs)
+
+            existing_doc = (getattr(func, "__doc__", "") or "").rstrip()
+            extra = (
+                "\n\nCONFIRMATION PROMPT:\n"
+                f"{confirmation_prompt.strip()}\n"
+            )
+            _wrapped.__doc__ = (existing_doc + extra) if existing_doc else extra.strip()
+
+            tool_kwargs.pop("confirmation_prompt", None)
+            tool = FunctionTool(**tool_kwargs | {"func": _wrapped})
+            setattr(tool, "confirmation_prompt", confirmation_prompt)
+            return tool
+
+        raise
 
 # Schema analysis tools
 get_source_schema_tool = FunctionTool(func=get_source_schema)
@@ -810,15 +985,26 @@ get_sample_data_tool = FunctionTool(func=get_sample_data)
 # Mapping tools
 suggest_column_mappings_tool = FunctionTool(func=suggest_column_mappings)
 
-# Approval tool - uses in-tool confirmation; if UI missing we auto-approve in dev
-approve_mappings_tool = FunctionTool(
+# Approval tool - REQUIRES explicit user confirmation before execution
+approve_mappings_tool = _create_function_tool_compat(
     func=approve_mappings,
-    require_confirmation=False
+    require_confirmation=False,
+    confirmation_prompt=(
+        "This is a human approval step. Reply with decision='approve' or decision='reject'. "
+        "If source_table/target_table are omitted, the most recent suggested mapping will be used."
+    ),
 )
 
 # Transformation tools
 generate_transformation_sql_tool = FunctionTool(func=generate_transformation_sql)
-execute_transformation_tool = FunctionTool(
+execute_transformation_tool = _create_function_tool_compat(
     func=execute_transformation,
-    require_confirmation=True  # Require confirmation before executing SQL
+    require_confirmation=False,
+    confirmation_prompt=(
+        "Safety gate: run with dry_run=True first to get an execution_token, then confirm execution by "
+        "calling again with dry_run=False and execution_token=<token>."
+    ),
 )
+
+# Audit log tools
+get_audit_logs_tool = FunctionTool(func=get_audit_logs)

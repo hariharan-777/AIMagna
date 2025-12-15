@@ -39,6 +39,7 @@ try:
         approve_mappings_tool,
         generate_transformation_sql_tool,
         execute_transformation_tool,
+        get_audit_logs_tool,
     )
 except ImportError:
     from tools import (
@@ -49,6 +50,7 @@ except ImportError:
         approve_mappings_tool,
         generate_transformation_sql_tool,
         execute_transformation_tool,
+        get_audit_logs_tool,
     )
 
 # Load environment variables
@@ -58,7 +60,7 @@ load_dotenv()
 # CONFIGURATION
 # =============================================================================
 
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3-pro-preview")
 
 # Dataset configuration from environment
 BQ_DATASET_SOURCE = os.environ.get("BQ_DATASET_SOURCE", "commercial_lending_source")
@@ -147,7 +149,9 @@ For EVERY mapping, you MUST explain:
    - High confidence (>80%): Direct name match or clear semantic equivalence
    - Medium confidence (60-80%): Probable match but naming conventions differ
    - Low confidence (<60%): Uncertain mapping requiring human judgment
-4. Use approve_mappings tool to request human approval via the UI
+4. Ask for explicit human approval in chat (do NOT rely on UI buttons)
+    - Tell the user to reply with "approve" or "reject"
+    - Then call approve_mappings(decision=<user reply>)
 
 ## Hallucination Prevention
 - NEVER suggest mappings for columns that don't exist in the schemas
@@ -229,7 +233,8 @@ For EVERY transformation, you MUST:
    - What risks exist in the transformation
    - What the validation status shows
 4. Use execute_transformation tool with dry_run=True to validate FIRST
-5. Only execute with dry_run=False after validation passes AND user confirms
+    - This returns an execution_token
+5. Only execute with dry_run=False after validation passes AND user confirms by providing execution_token
 
 ## SQL Generation Rules
 - Use fully qualified table names: project.dataset.table
@@ -289,6 +294,33 @@ Always prioritize data safety. When in doubt, recommend dry_run validation first
 
 
 # =============================================================================
+# SUB-AGENT: AUDIT LOGS AGENT
+# =============================================================================
+
+audit_logs_agent = LlmAgent(
+    name="audit_logs_agent",
+    model=GEMINI_MODEL,
+    description=(
+        "Helps inspect the system audit trail (schema access, mapping decisions, SQL validation/execution). "
+        "Use this agent to answer: what happened, when, and why."
+    ),
+    instruction="""You are an Audit Trail Analyst.
+
+Your job is to retrieve and summarize audit events written by the guardrails layer.
+
+How to work:
+1. Use get_audit_logs to fetch the most recent events.
+2. Summarize key actions (event_type, action, risk_level) and highlight failures/warnings.
+3. If the user asks about a specific step (mappings, SQL execution), filter your explanation to that.
+
+When the user says "nothing happens", confirm whether there are any recent events at all.
+If there are no files/events, instruct them to run an action like schema analysis to generate logs.""",
+    tools=[get_audit_logs_tool],
+    output_key="audit_logs_result",
+)
+
+
+# =============================================================================
 # ROOT AGENT: AIMAGNA DATA INTEGRATION COORDINATOR
 # =============================================================================
 
@@ -333,6 +365,7 @@ The typical data integration workflow is:
 - "Approve mappings" - Review and approve/reject proposed mappings
 - "Generate SQL for [source] to [target]" - Create transformation SQL
 - "Execute transformation" - Run the SQL (with confirmation)
+- "Show audit logs" - Inspect the audit trail of actions and risk checks
 
 ## Example Tables
 Source tables: borrower, loan, facility, payment, collateral, guarantor, 
@@ -349,5 +382,6 @@ the appropriate workflow steps.""",
         schema_analyzer_agent,
         mapping_agent,
         transformation_agent,
+        audit_logs_agent,
     ],
 )

@@ -34,14 +34,14 @@ COPY agent.py __init__.py tools.py guardrails.py ./data_integration_agent/
 # Copy server.py to the root (it's not part of the agent module)
 COPY server.py .
 
-# Create logs directory outside the agent folder to avoid ADK confusion
-RUN mkdir -p /app/audit_logs
+# Create logs directory outside /app (ADK scans /app for agent apps)
+RUN mkdir -p /tmp/audit_logs
 
 # Environment variables (overridden by Secret Manager in Cloud Run)
 ENV PORT=8080 \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    AUDIT_LOG_DIR=/app/audit_logs
+    AUDIT_LOG_DIR=/tmp/audit_logs
 
 EXPOSE 8080
 
