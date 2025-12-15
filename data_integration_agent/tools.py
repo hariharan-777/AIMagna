@@ -211,54 +211,6 @@ def get_target_schema(
         return {"error": str(e), "dataset_id": dataset_id}
 
 
-def get_sample_data(
-    dataset_id: str,
-    table_name: str,
-    limit: int = 5,
-    tool_context: ToolContext = None
-) -> dict:
-    """Retrieves sample rows from a BigQuery table for data profiling.
-    
-    Args:
-        dataset_id: The BigQuery dataset ID.
-        table_name: The table name to sample.
-        limit: Number of rows to retrieve (default 5).
-        
-    Returns:
-        Dictionary containing sample rows and basic statistics.
-    """
-    project_id = os.environ.get("BQ_PROJECT_ID", os.environ.get("GOOGLE_CLOUD_PROJECT"))
-    client = bigquery.Client(project=project_id)
-    
-    query = f"""
-    SELECT *
-    FROM `{project_id}.{dataset_id}.{table_name}`
-    LIMIT {limit}
-    """
-    
-    try:
-        results = client.query(query).result()
-        
-        rows = []
-        schema = []
-        for i, row in enumerate(results):
-            if i == 0:
-                schema = list(row.keys())
-            # Convert row to JSON-safe dict (handles date, datetime, Decimal, etc.)
-            rows.append(_make_json_safe(dict(row)))
-        
-        return {
-            "dataset_id": dataset_id,
-            "table_name": table_name,
-            "schema": schema,
-            "sample_rows": rows,
-            "row_count": len(rows)
-        }
-        
-    except Exception as e:
-        return {"error": str(e), "table_name": table_name}
-
-
 # =============================================================================
 # MAPPING DISCOVERY TOOLS
 # =============================================================================
@@ -1051,7 +1003,6 @@ def _create_function_tool_compat(
 # Schema analysis tools
 get_source_schema_tool = FunctionTool(func=get_source_schema)
 get_target_schema_tool = FunctionTool(func=get_target_schema)
-get_sample_data_tool = FunctionTool(func=get_sample_data)
 
 # Mapping tools
 suggest_column_mappings_tool = FunctionTool(func=suggest_column_mappings)

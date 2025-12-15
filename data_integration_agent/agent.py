@@ -34,7 +34,6 @@ try:
     from .tools import (
         get_source_schema_tool,
         get_target_schema_tool,
-        get_sample_data_tool,
         suggest_column_mappings_tool,
         approve_mappings_tool,
         generate_transformation_sql_tool,
@@ -45,7 +44,6 @@ except ImportError:
     from tools import (
         get_source_schema_tool,
         get_target_schema_tool,
-        get_sample_data_tool,
         suggest_column_mappings_tool,
         approve_mappings_tool,
         generate_transformation_sql_tool,
@@ -90,8 +88,7 @@ database schemas for data integration tasks.
 
 ## How to Work
 1. When asked to analyze schemas, use get_source_schema and get_target_schema tools
-2. For data profiling, use get_sample_data to examine actual values
-3. Summarize findings clearly, highlighting:
+2. Summarize findings clearly, highlighting:
    - Table counts and names
    - Column counts per table
    - Data type patterns
@@ -107,7 +104,6 @@ Always be thorough but concise in your analysis.""",
     tools=[
         get_source_schema_tool,
         get_target_schema_tool,
-        get_sample_data_tool,
     ],
     output_key="schema_analysis_result",
 )
