@@ -77,21 +77,42 @@ if ($LASTEXITCODE -eq 0) {
 
 $secretsArg = $secrets -join ","
 
+# Build Cloud SQL instances string
+$cloudSqlInstances = ""
+if ($LASTEXITCODE -eq 0) {
+    $cloudSqlInstances = "--add-cloudsql-instances=${Project}:us-central1:adk-sessions"
+}
+
 # Deploy to Cloud Run from source
 Write-Host "🏗️  Building and deploying..." -ForegroundColor Yellow
 Write-Host ""
 
-gcloud run deploy $ServiceName `
-    --source=data_integration_agent `
-    --region=$Region `
-    --platform=managed `
-    --allow-unauthenticated `
-    --set-secrets=$secretsArg `
-    --memory=2Gi `
-    --cpu=2 `
-    --timeout=300 `
-    --min-instances=0 `
-    --max-instances=10
+if ($cloudSqlInstances) {
+    gcloud run deploy $ServiceName `
+        --source=data_integration_agent `
+        --region=$Region `
+        --platform=managed `
+        --allow-unauthenticated `
+        --set-secrets=$secretsArg `
+        --memory=2Gi `
+        --cpu=2 `
+        --timeout=300 `
+        --min-instances=0 `
+        --max-instances=10 `
+        $cloudSqlInstances
+} else {
+    gcloud run deploy $ServiceName `
+        --source=data_integration_agent `
+        --region=$Region `
+        --platform=managed `
+        --allow-unauthenticated `
+        --set-secrets=$secretsArg `
+        --memory=2Gi `
+        --cpu=2 `
+        --timeout=300 `
+        --min-instances=0 `
+        --max-instances=10
+}
 
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Deployment failed!"
