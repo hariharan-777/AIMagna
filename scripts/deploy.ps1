@@ -51,6 +51,9 @@ gcloud projects add-iam-policy-binding $Project `
     --quiet 2>$null
 
 # Build secrets string for Cloud Run
+# Note: AUDIT_LOG_DIR removed - audit logs now stored in BigQuery (auto-created)
+# Note: SESSION_DB_URL added for persistent session storage (optional - requires Cloud SQL setup)
+# Note: BQ_AUDIT_DATASET added for audit log BigQuery dataset
 $secrets = @(
     "GOOGLE_CLOUD_PROJECT=GOOGLE_CLOUD_PROJECT:latest",
     "GOOGLE_CLOUD_LOCATION=GOOGLE_CLOUD_LOCATION:latest",
@@ -60,25 +63,56 @@ $secrets = @(
     "BQ_DATASET_TARGET=BQ_DATASET_TARGET:latest",
     "GEMINI_MODEL=GEMINI_MODEL:latest",
     "APP_PASSWORD=APP_PASSWORD:latest",
-    "AUDIT_LOG_DIR=AUDIT_LOG_DIR:latest"
+    "BQ_AUDIT_DATASET=BQ_AUDIT_DATASET:latest"
 )
+
+# Add SESSION_DB_URL if the secret exists (optional - for persistent sessions)
+$sessionSecretExists = gcloud secrets describe SESSION_DB_URL --project=$Project 2>$null
+if ($LASTEXITCODE -eq 0) {
+    $secrets += "SESSION_DB_URL=SESSION_DB_URL:latest"
+    Write-Host "   ✅ SESSION_DB_URL secret found - enabling persistent sessions" -ForegroundColor Green
+} else {
+    Write-Host "   ⚠️ SESSION_DB_URL secret not found - sessions will be ephemeral" -ForegroundColor Yellow
+}
+
 $secretsArg = $secrets -join ","
+
+# Build Cloud SQL instances string
+$cloudSqlInstances = ""
+if ($LASTEXITCODE -eq 0) {
+    $cloudSqlInstances = "--add-cloudsql-instances=${Project}:us-central1:adk-sessions"
+}
 
 # Deploy to Cloud Run from source
 Write-Host "🏗️  Building and deploying..." -ForegroundColor Yellow
 Write-Host ""
 
-gcloud run deploy $ServiceName `
-    --source=data_integration_agent `
-    --region=$Region `
-    --platform=managed `
-    --allow-unauthenticated `
-    --set-secrets=$secretsArg `
-    --memory=2Gi `
-    --cpu=2 `
-    --timeout=300 `
-    --min-instances=0 `
-    --max-instances=10
+if ($cloudSqlInstances) {
+    gcloud run deploy $ServiceName `
+        --source=data_integration_agent `
+        --region=$Region `
+        --platform=managed `
+        --allow-unauthenticated `
+        --set-secrets=$secretsArg `
+        --memory=2Gi `
+        --cpu=2 `
+        --timeout=300 `
+        --min-instances=0 `
+        --max-instances=10 `
+        $cloudSqlInstances
+} else {
+    gcloud run deploy $ServiceName `
+        --source=data_integration_agent `
+        --region=$Region `
+        --platform=managed `
+        --allow-unauthenticated `
+        --set-secrets=$secretsArg `
+        --memory=2Gi `
+        --cpu=2 `
+        --timeout=300 `
+        --min-instances=0 `
+        --max-instances=10
+}
 
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Deployment failed!"

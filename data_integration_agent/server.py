@@ -1,27 +1,27 @@
 """
 Custom server entry point with password authentication.
 
-This wraps the ADK web server with a simple password gate.
-Uses session-based auth stored in browser localStorage.
+Simple password gate for the ADK web server.
 """
 
 import os
 import secrets
-from typing import Optional
+from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 
-from fastapi import FastAPI, Request, HTTPException, Depends, Response
-from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi import FastAPI, Request, HTTPException, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 import uvicorn
 
 # Load environment variables
 load_dotenv()
 
-# Get password from environment or Secret Manager
-APP_PASSWORD = os.environ.get("APP_PASSWORD", "aimagna@2025")
+# Get password from environment
+APP_PASSWORD = os.environ.get("APP_PASSWORD", "aimagna")
 
+# Debug: Log password info on startup (masked for security)
+print(f"🔐 APP_PASSWORD configured: {'✅ from env' if 'APP_PASSWORD' in os.environ else '⚠️ using default'} (length: {len(APP_PASSWORD)})")
 
 # =============================================================================
 # LOGIN PAGE HTML
@@ -33,7 +33,7 @@ LOGIN_HTML = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LLL Data Integration - Login</title>
+    <title>AIMagna: Multi Agent Data Integration Demo - Login</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
@@ -117,8 +117,8 @@ LOGIN_HTML = """
 <body>
     <div class="login-container">
         <div class="logo">
-            <h1>🔐 LLL Data Integration</h1>
-            <p>AI-Powered Schema Mapping System</p>
+            <h1>🔐 AIMagna</h1>
+            <p>Multi Agent Data Integration Demo</p>
         </div>
         <div class="error" id="error">Invalid password. Please try again.</div>
         <form id="loginForm">
@@ -133,7 +133,11 @@ LOGIN_HTML = """
     <script>
         // Check if already authenticated
         if (localStorage.getItem('auth_token')) {
-            window.location.href = '/dev-ui/';
+            fetch('/auth/check', {
+                headers: { 'X-Auth-Token': localStorage.getItem('auth_token') }
+            }).then(r => r.json()).then(data => {
+                if (data.authenticated) window.location.href = '/dev-ui/';
+            });
         }
         
         document.getElementById('loginForm').addEventListener('submit', async (e) => {
@@ -164,15 +168,11 @@ LOGIN_HTML = """
 </html>
 """
 
-
 # =============================================================================
 # AUTH TOKEN MANAGEMENT
 # =============================================================================
 
-# In-memory token store (simple for this use case)
-# In production, use Redis or database
 valid_tokens: set = set()
-
 
 def generate_token() -> str:
     """Generate a secure random token."""
@@ -180,11 +180,9 @@ def generate_token() -> str:
     valid_tokens.add(token)
     return token
 
-
 def validate_token(token: str) -> bool:
     """Check if token is valid."""
     return token in valid_tokens
-
 
 # =============================================================================
 # AUTH MIDDLEWARE
@@ -193,7 +191,7 @@ def validate_token(token: str) -> bool:
 class AuthMiddleware(BaseHTTPMiddleware):
     """Middleware to check authentication on all requests except login."""
     
-    EXCLUDED_PATHS = {"/", "/auth/login", "/auth/check", "/favicon.ico"}
+    EXCLUDED_PATHS = {"/", "/auth/login", "/auth/check", "/favicon.ico", "/health"}
     
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
@@ -202,115 +200,144 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if path in self.EXCLUDED_PATHS:
             return await call_next(request)
         
-        # Check for auth token in header or query param
+        # Allow all /dev-ui routes (ADK app handles its own auth if needed)
+        if path.startswith("/dev-ui"):
+            return await call_next(request)
+        
+        # Check for auth token
         token = request.headers.get("X-Auth-Token")
         if not token:
             token = request.query_params.get("token")
         if not token:
-            # Check cookies
             token = request.cookies.get("auth_token")
         
         if token and validate_token(token):
-            response = await call_next(request)
-            return response
+            return await call_next(request)
         
         # For API requests, return 401
         if path.startswith("/api") or request.headers.get("Accept") == "application/json":
-            return JSONResponse(
-                status_code=401,
-                content={"detail": "Authentication required"}
-            )
+            return JSONResponse(status_code=401, content={"detail": "Authentication required"})
         
         # For web pages, redirect to login
         return HTMLResponse(
-            content=f'<script>localStorage.removeItem("auth_token"); window.location.href="/";</script>',
+            content='<script>localStorage.removeItem("auth_token"); window.location.href="/";</script>',
             status_code=401
         )
 
+# =============================================================================
+# MOUNT ADK APP ON STARTUP
+# =============================================================================
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan event handler - replaces deprecated on_event."""
+    # Startup
+    try:
+        from google.adk.cli.fast_api import get_fast_api_app
+        
+        # Import session service for persistent sessions
+        try:
+            from session_config import get_session_service
+            session_service = get_session_service()
+        except ImportError:
+            print("⚠️ session_config not found, using default session service")
+            session_service = None
+        except Exception as e:
+            print(f"⚠️ Failed to initialize session service: {e}")
+            session_service = None
+        
+        # agents_dir should be the parent directory containing agent folders
+        # Structure: /app/data_integration_agent/agent.py (with root_agent)
+        adk_app_kwargs = {
+            "agents_dir": "/app",
+            "web": True,
+            "url_prefix": "/dev-ui"
+        }
+        
+        # Add session_service if available
+        if session_service is not None:
+            adk_app_kwargs["session_service"] = session_service
+            print("✅ ADK app configured with persistent session service")
+        
+        adk_app = get_fast_api_app(**adk_app_kwargs)
+        
+        # Mount ADK under /dev-ui prefix
+        app.mount("/dev-ui", adk_app)
+        print("✅ ADK app mounted at /dev-ui")
+        
+    except Exception as e:
+        print(f"⚠️ Could not mount ADK: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    yield
+    # Shutdown (if needed)
 
 # =============================================================================
-# FASTAPI APP WITH AUTH
+# FASTAPI APP
 # =============================================================================
 
-def create_app() -> FastAPI:
-    """Create FastAPI app with auth wrapper around ADK."""
+app = FastAPI(title="AIMagna: Multi Agent Data Integration Demo", lifespan=lifespan)
+
+# Add auth middleware
+app.add_middleware(AuthMiddleware)
+
+@app.get("/", response_class=HTMLResponse)
+async def login_page():
+    """Serve login page."""
+    return LOGIN_HTML
+
+@app.get("/dev-ui")
+async def dev_ui_redirect():
+    """Redirect /dev-ui (no trailing slash) to /dev-ui/ for the mounted ADK app."""
+    return RedirectResponse(url="/dev-ui/", status_code=302)
+
+@app.get("/health")
+async def health():
+    """Health check endpoint."""
+    return {"status": "healthy"}
+
+@app.post("/auth/login")
+async def login(request: Request, response: Response):
+    """Handle login and return token."""
+    body = await request.json()
+    password = body.get("password", "")
     
-    # Import ADK app
-    from google.adk.cli.fast_api import get_fast_api_app
-    from . import agent
+    # Debug logging
+    print(f"🔍 Login attempt - received: '{password}' (len={len(password)}), expected: (len={len(APP_PASSWORD)}), match={password == APP_PASSWORD}")
     
-    # Create ADK app
-    adk_app = get_fast_api_app(
-        agent_dir="data_integration_agent",
-        agents=[agent.root_agent],
-        web=True,
-        enable_trace_logging=False
-    )
+    if password == APP_PASSWORD:
+        token = generate_token()
+        response.set_cookie(
+            key="auth_token",
+            value=token,
+            httponly=False,
+            samesite="lax",
+            max_age=86400 * 7
+        )
+        return {"token": token, "status": "ok"}
     
-    # Create wrapper app
-    app = FastAPI(title="LLL Data Integration Agent")
-    
-    # Add auth middleware
-    app.add_middleware(AuthMiddleware)
-    
-    # Mount ADK app under /dev-ui
-    # Note: ADK dev UI is served at root, we redirect
-    
-    @app.get("/", response_class=HTMLResponse)
-    async def login_page():
-        """Serve login page."""
-        return LOGIN_HTML
-    
-    @app.post("/auth/login")
-    async def login(request: Request, response: Response):
-        """Handle login and return token."""
-        body = await request.json()
-        password = body.get("password", "")
-        
-        if password == APP_PASSWORD:
-            token = generate_token()
-            response.set_cookie(
-                key="auth_token",
-                value=token,
-                httponly=False,  # Allow JS access for SPA
-                samesite="lax",
-                max_age=86400 * 7  # 7 days
-            )
-            return {"token": token, "status": "ok"}
-        
-        raise HTTPException(status_code=401, detail="Invalid password")
-    
-    @app.get("/auth/check")
-    async def check_auth(request: Request):
-        """Check if current token is valid."""
-        token = request.headers.get("X-Auth-Token")
-        if not token:
-            token = request.cookies.get("auth_token")
-        
-        if token and validate_token(token):
-            return {"authenticated": True}
-        return {"authenticated": False}
-    
-    @app.get("/auth/logout")
-    async def logout(request: Request, response: Response):
-        """Logout and invalidate token."""
+    raise HTTPException(status_code=401, detail="Invalid password")
+
+@app.get("/auth/check")
+async def check_auth(request: Request):
+    """Check if current token is valid."""
+    token = request.headers.get("X-Auth-Token")
+    if not token:
         token = request.cookies.get("auth_token")
-        if token and token in valid_tokens:
-            valid_tokens.discard(token)
-        response.delete_cookie("auth_token")
-        return {"status": "logged out"}
     
-    # Mount ADK routes - copy all routes from adk_app
-    for route in adk_app.routes:
-        if hasattr(route, 'path'):
-            app.routes.append(route)
-    
-    return app
+    if token and validate_token(token):
+        return {"authenticated": True}
+    return {"authenticated": False}
 
-
-# Create the app instance
-app = create_app()
-
+@app.get("/auth/logout")
+async def logout(request: Request, response: Response):
+    """Logout and invalidate token."""
+    token = request.cookies.get("auth_token")
+    if token and token in valid_tokens:
+        valid_tokens.discard(token)
+    response.delete_cookie("auth_token")
+    return {"status": "logged out"}
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))

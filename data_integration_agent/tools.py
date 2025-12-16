@@ -24,23 +24,64 @@ This module provides tools with:
 
 import os
 import json
-from datetime import datetime
+from datetime import datetime, date
+from decimal import Decimal
 from typing import Optional
 from google.adk.tools import FunctionTool
 from google.adk.tools.tool_context import ToolContext
 from google.cloud import bigquery
 
 # Import guardrails for validation, explainability, and risk management
-from .guardrails import (
-    log_audit_event,
-    validate_identifier,
-    validate_sql_query,
-    validate_mapping_output,
-    validate_confidence_threshold,
-    generate_mapping_explanation,
-    generate_risk_assessment,
-    validated_tool,
-)
+try:
+    from .guardrails import (
+        log_audit_event,
+        validate_identifier,
+        validate_sql_query,
+        validate_mapping_output,
+        validate_confidence_threshold,
+        generate_mapping_explanation,
+        generate_risk_assessment,
+        validated_tool,
+    )
+except ImportError:
+    from guardrails import (
+        log_audit_event,
+        validate_identifier,
+        validate_sql_query,
+        validate_mapping_output,
+        validate_confidence_threshold,
+        generate_mapping_explanation,
+        generate_risk_assessment,
+        validated_tool,
+    )
+
+
+# =============================================================================
+# JSON SERIALIZATION HELPERS
+# =============================================================================
+
+def _json_safe_value(obj):
+    """Convert non-JSON-serializable objects to safe representations."""
+    if obj is None:
+        return None
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    if isinstance(obj, Decimal):
+        return float(obj)
+    if isinstance(obj, bytes):
+        return obj.decode('utf-8', errors='replace')
+    if hasattr(obj, '__dict__'):
+        return str(obj)
+    return obj
+
+
+def _make_json_safe(data):
+    """Recursively convert a data structure to be JSON-serializable."""
+    if isinstance(data, dict):
+        return {k: _make_json_safe(v) for k, v in data.items()}
+    if isinstance(data, list):
+        return [_make_json_safe(item) for item in data]
+    return _json_safe_value(data)
 
 
 # =============================================================================
@@ -168,53 +209,6 @@ def get_target_schema(
         
     except Exception as e:
         return {"error": str(e), "dataset_id": dataset_id}
-
-
-def get_sample_data(
-    dataset_id: str,
-    table_name: str,
-    limit: int = 5,
-    tool_context: ToolContext = None
-) -> dict:
-    """Retrieves sample rows from a BigQuery table for data profiling.
-    
-    Args:
-        dataset_id: The BigQuery dataset ID.
-        table_name: The table name to sample.
-        limit: Number of rows to retrieve (default 5).
-        
-    Returns:
-        Dictionary containing sample rows and basic statistics.
-    """
-    project_id = os.environ.get("BQ_PROJECT_ID", os.environ.get("GOOGLE_CLOUD_PROJECT"))
-    client = bigquery.Client(project=project_id)
-    
-    query = f"""
-    SELECT *
-    FROM `{project_id}.{dataset_id}.{table_name}`
-    LIMIT {limit}
-    """
-    
-    try:
-        results = client.query(query).result()
-        
-        rows = []
-        schema = []
-        for i, row in enumerate(results):
-            if i == 0:
-                schema = list(row.keys())
-            rows.append(dict(row))
-        
-        return {
-            "dataset_id": dataset_id,
-            "table_name": table_name,
-            "schema": schema,
-            "sample_rows": rows,
-            "row_count": len(rows)
-        }
-        
-    except Exception as e:
-        return {"error": str(e), "table_name": table_name}
 
 
 # =============================================================================
@@ -390,6 +384,9 @@ def suggest_column_mappings(
     suggested_mappings = tool_context.state.get("suggested_mappings", {})
     suggested_mappings[f"{source_table}_to_{target_table}"] = result
     tool_context.state["suggested_mappings"] = suggested_mappings
+
+    # Track most recent suggestion for simpler follow-up approvals
+    tool_context.state["last_suggested_mapping_key"] = f"{source_table}_to_{target_table}"
     
     return result
 
@@ -420,15 +417,16 @@ def _similar_names(name1: str, name2: str) -> bool:
 # =============================================================================
 
 def approve_mappings(
-    source_table: str,
-    target_table: str,
-    tool_context: ToolContext
+    source_table: str | None = None,
+    target_table: str | None = None,
+    decision: str = "approve",
+    tool_context: ToolContext = None
 ) -> dict:
-    """Requests human approval for suggested column mappings via interactive confirmation.
-    
-    This tool displays a table of proposed mappings with confidence scores and
-    waits for human approval before proceeding with transformation generation.
-    
+    """Requests human approval for suggested column mappings.
+
+    This tool is intentionally text-driven (no UI confirmation dependency).
+    The agent should ask the user to reply with "approve" or "reject".
+
     Args:
         source_table: Name of the source table.
         target_table: Name of the target table.
@@ -437,7 +435,34 @@ def approve_mappings(
         Dictionary containing approval status and final mappings.
     """
     suggested_mappings = tool_context.state.get("suggested_mappings", {})
-    mapping_key = f"{source_table}_to_{target_table}"
+
+    # Allow approving the most recent suggestion without repeating table names.
+    if not source_table or not target_table:
+        mapping_key = tool_context.state.get("last_suggested_mapping_key")
+        if not mapping_key:
+            return {
+                "error": "No source/target provided and no prior suggested mapping found. Run suggest_column_mappings first.",
+            }
+        try:
+            source_table, target_table = mapping_key.split("_to_", 1)
+        except ValueError:
+            return {
+                "error": "Could not infer source/target from last suggested mapping. Please provide source_table and target_table explicitly.",
+            }
+    else:
+        mapping_key = f"{source_table}_to_{target_table}"
+
+    normalized = (decision or "").strip().lower()
+    if any(word in normalized for word in ["reject", "rejected", "no", "decline", "deny"]):
+        final_decision = "rejected"
+    elif any(word in normalized for word in ["approve", "approved", "yes", "accept", "ok"]):
+        final_decision = "approved"
+    else:
+        return {
+            "error": "Invalid decision. Reply with 'approve' or 'reject'.",
+            "source_table": source_table,
+            "target_table": target_table,
+        }
     
     if mapping_key not in suggested_mappings:
         return {
@@ -448,17 +473,6 @@ def approve_mappings(
     
     mapping_data = suggested_mappings[mapping_key]
     
-    # Format mappings as a table for human review
-    mapping_table = []
-    for m in mapping_data["mappings"]:
-        mapping_table.append({
-            "target": m["target_column"],
-            "source": m["source_column"] or "(unmapped)",
-            "confidence": f"{m['confidence']*100:.0f}%" if m["confidence"] else "N/A",
-            "transform": m["transformation"] or "direct",
-            "status": m["status"]
-        })
-    
     # Generate risk assessment for approval decision
     risk_assessment = generate_risk_assessment(
         "MAPPING_APPROVE",
@@ -467,40 +481,13 @@ def approve_mappings(
             "unmapped_count": mapping_data["unmapped_count"]
         }
     )
-    
-    # Request human confirmation with structured payload
-    confirmation_payload = {
-        "title": f"Column Mapping Approval: {source_table} → {target_table}",
-        "summary": {
-            "total_columns": len(mapping_data["mappings"]),
-            "mapped": mapping_data["mapping_count"],
-            "unmapped": mapping_data["unmapped_count"],
-            "avg_confidence": f"{mapping_data['average_confidence']*100:.0f}%"
-        },
-        "risk_assessment": {
-            "risk_level": risk_assessment["risk_level"],
-            "risk_factors": risk_assessment["risk_factors"],
-            "mitigations": risk_assessment["mitigations"],
-            "recommendation": risk_assessment["recommendation"]
-        },
-        "confidence_analysis": mapping_data.get("confidence_analysis", {}),
-        "mappings": mapping_table,
-        "explanations": mapping_data.get("explanations", [])
-    }
-    
-    # Use ADK's request_confirmation for human-in-the-loop
-    approved = tool_context.request_confirmation(
-        hint="Review the proposed column mappings below. Approve to proceed with SQL generation, or reject to modify mappings.",
-        payload=confirmation_payload
-    )
-    
-    if approved:
-        # Store approved mappings
+
+    if final_decision == "approved":
+        # Store approved mappings in state
         approved_mappings = tool_context.state.get("approved_mappings", {})
         approved_mappings[mapping_key] = mapping_data
         tool_context.state["approved_mappings"] = approved_mappings
-        
-        # Audit log the approval
+
         log_audit_event(
             "MAPPING",
             "MAPPINGS_APPROVED",
@@ -512,34 +499,48 @@ def approve_mappings(
             },
             risk_level="LOW"
         )
-        
+
         return {
             "status": "approved",
             "source_table": source_table,
             "target_table": target_table,
             "mapping_count": mapping_data["mapping_count"],
-            "message": "Mappings approved. Ready to generate transformation SQL.",
+            "unmapped_count": mapping_data["unmapped_count"],
+            "average_confidence": f"{mapping_data['average_confidence']*100:.0f}%",
+            "risk_level": risk_assessment["risk_level"],
+            "message": "✅ Mappings approved! Ready to generate transformation SQL.",
+            "next_step": "Use generate_transformation_sql to create the SQL transformation.",
             "audit_trail": f"Approved at {datetime.utcnow().isoformat()}"
         }
-    else:
-        # Audit log the rejection
-        log_audit_event(
-            "MAPPING",
-            "MAPPINGS_REJECTED",
-            {
-                "source_table": source_table,
-                "target_table": target_table
-            },
-            risk_level="LOW"
-        )
-        
-        return {
-            "status": "rejected",
+
+    # Rejected path
+    rejected_mappings = tool_context.state.get("rejected_mappings", {})
+    rejected_mappings[mapping_key] = mapping_data
+    tool_context.state["rejected_mappings"] = rejected_mappings
+
+    log_audit_event(
+        "MAPPING",
+        "MAPPINGS_REJECTED",
+        {
             "source_table": source_table,
             "target_table": target_table,
-            "message": "Mappings rejected. Please provide feedback for adjustments.",
-            "audit_trail": f"Rejected at {datetime.utcnow().isoformat()}"
-        }
+            "mapping_count": mapping_data["mapping_count"],
+            "avg_confidence": mapping_data["average_confidence"]
+        },
+        risk_level="LOW"
+    )
+
+    return {
+        "status": "rejected",
+        "source_table": source_table,
+        "target_table": target_table,
+        "mapping_count": mapping_data["mapping_count"],
+        "unmapped_count": mapping_data["unmapped_count"],
+        "average_confidence": f"{mapping_data['average_confidence']*100:.0f}%",
+        "risk_level": risk_assessment["risk_level"],
+        "message": "❌ Mappings rejected. Tell me what to change (columns, naming, transformations), and I’ll regenerate suggestions.",
+        "audit_trail": f"Rejected at {datetime.utcnow().isoformat()}"
+    }
 
 
 # =============================================================================
@@ -686,6 +687,7 @@ def execute_transformation(
     source_table: str,
     target_table: str,
     dry_run: bool = True,
+    execution_token: str | None = None,
     tool_context: ToolContext = None
 ) -> dict:
     """Executes the generated transformation SQL against BigQuery.
@@ -720,6 +722,13 @@ def execute_transformation(
         query_job = client.query(sql, job_config=job_config)
         
         if dry_run:
+            # Create a short-lived execution token for explicit user confirmation.
+            import secrets
+            tokens = tool_context.state.get("execution_tokens", {})
+            token = secrets.token_hex(4).upper()
+            tokens[mapping_key] = token
+            tool_context.state["execution_tokens"] = tokens
+
             # Audit log validation
             log_audit_event(
                 "SQL_EXECUTION",
@@ -738,10 +747,34 @@ def execute_transformation(
                 "source_table": source_table,
                 "target_table": target_table,
                 "bytes_processed": query_job.total_bytes_processed,
-                "message": "SQL validated successfully. Set dry_run=False to execute.",
+                "message": "SQL validated successfully. To execute, reply with the execution token.",
+                "execution_token": token,
                 "risk_note": "Dry run completed - no data was modified"
             }
         else:
+            tokens = tool_context.state.get("execution_tokens", {})
+            expected = tokens.get(mapping_key)
+            provided = (execution_token or "").strip().upper()
+            if not expected:
+                return {
+                    "status": "blocked",
+                    "source_table": source_table,
+                    "target_table": target_table,
+                    "error": "No execution token found. Run execute_transformation with dry_run=True first.",
+                }
+            if provided != expected:
+                return {
+                    "status": "blocked",
+                    "source_table": source_table,
+                    "target_table": target_table,
+                    "error": "Execution blocked. Invalid or missing execution_token.",
+                    "hint": "Run dry_run=True to get a token, then call again with dry_run=False and execution_token=<token>.",
+                }
+
+            # Invalidate token after successful confirmation
+            tokens.pop(mapping_key, None)
+            tool_context.state["execution_tokens"] = tokens
+
             # Wait for job completion
             query_job.result()
             
@@ -791,26 +824,209 @@ def execute_transformation(
 
 
 # =============================================================================
+# AUDIT LOG TOOLS - BigQuery-backed
+# =============================================================================
+
+def get_audit_logs(
+    limit: int = 50,
+    event_type: str | None = None,
+    risk_level: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    tool_context: ToolContext = None,
+) -> dict:
+    """Return recent audit log events from BigQuery.
+
+    Notes:
+    - Audit logs are stored in BigQuery with streaming inserts.
+    - Table: {project}.audit.audit_logs (partitioned by timestamp)
+    - Supports filtering by event_type, risk_level, and date range.
+
+    Args:
+        limit: Max number of most recent events to return (1-500).
+        event_type: Optional filter (e.g. "MAPPING", "SQL_EXECUTION", "SECURITY").
+        risk_level: Optional filter (e.g. "LOW", "MEDIUM", "HIGH", "CRITICAL").
+        start_date: Optional start date filter (YYYY-MM-DD format).
+        end_date: Optional end date filter (YYYY-MM-DD format).
+
+    Returns:
+        Dictionary with query metadata and audit events.
+    """
+    try:
+        limit = int(limit)
+    except Exception:
+        limit = 50
+    limit = max(1, min(limit, 500))
+
+    project_id = os.environ.get("BQ_PROJECT_ID", os.environ.get("GOOGLE_CLOUD_PROJECT"))
+    audit_dataset = os.environ.get("BQ_AUDIT_DATASET", "audit")
+    audit_table = os.environ.get("BQ_AUDIT_TABLE", "audit_logs")
+    table_id = f"{project_id}.{audit_dataset}.{audit_table}"
+
+    # Build query with optional filters
+    query_parts = [f"""
+        SELECT 
+            timestamp,
+            event_type,
+            action,
+            user_id,
+            risk_level,
+            details,
+            retention_days
+        FROM `{table_id}`
+        WHERE 1=1
+    """]
+    
+    query_params = []
+    
+    if event_type:
+        query_parts.append("AND event_type = @event_type")
+        query_params.append(bigquery.ScalarQueryParameter("event_type", "STRING", event_type.upper()))
+    
+    if risk_level:
+        query_parts.append("AND risk_level = @risk_level")
+        query_params.append(bigquery.ScalarQueryParameter("risk_level", "STRING", risk_level.upper()))
+    
+    if start_date:
+        query_parts.append("AND DATE(timestamp) >= @start_date")
+        query_params.append(bigquery.ScalarQueryParameter("start_date", "DATE", start_date))
+    
+    if end_date:
+        query_parts.append("AND DATE(timestamp) <= @end_date")
+        query_params.append(bigquery.ScalarQueryParameter("end_date", "DATE", end_date))
+    
+    query_parts.append(f"ORDER BY timestamp DESC LIMIT {limit}")
+    
+    query = "\n".join(query_parts)
+
+    try:
+        client = bigquery.Client(project=project_id)
+        
+        job_config = bigquery.QueryJobConfig(query_parameters=query_params) if query_params else None
+        results = client.query(query, job_config=job_config).result()
+        
+        events = []
+        for row in results:
+            event = {
+                "timestamp": row.timestamp.isoformat() if row.timestamp else None,
+                "event_type": row.event_type,
+                "action": row.action,
+                "user_id": row.user_id,
+                "risk_level": row.risk_level,
+                "retention_days": row.retention_days,
+            }
+            # Parse details JSON if present
+            if row.details:
+                try:
+                    event["details"] = json.loads(row.details) if isinstance(row.details, str) else row.details
+                except Exception:
+                    event["details"] = row.details
+            events.append(event)
+        
+        return {
+            "status": "ok",
+            "table": table_id,
+            "returned": len(events),
+            "filters": {
+                "event_type": event_type,
+                "risk_level": risk_level,
+                "start_date": start_date,
+                "end_date": end_date,
+            },
+            "events": events,
+        }
+        
+    except Exception as e:
+        return {
+            "status": "error",
+            "table": table_id,
+            "error": str(e),
+            "message": "Failed to query audit logs. The audit table may not exist yet - trigger an action to auto-create it.",
+        }
+
+
+# =============================================================================
 # TOOL EXPORTS
 # =============================================================================
+
+def _create_function_tool_compat(
+    *,
+    func,
+    require_confirmation: bool = False,
+    confirmation_prompt: str | None = None,
+):
+    """Create a FunctionTool with best-effort confirmation prompt support.
+
+    Some `google-adk` versions support `confirmation_prompt` in `FunctionTool.__init__`,
+    others do not. Passing an unknown kwarg prevents the agent module from loading.
+
+    Strategy:
+    - Prefer native `confirmation_prompt` when supported.
+    - Otherwise, fall back to:
+      * creating the tool without that kwarg
+      * embedding the prompt into the tool's description (via docstring)
+      * attaching `confirmation_prompt` as an attribute for any custom UI.
+    """
+    tool_kwargs = {
+        "func": func,
+        "require_confirmation": require_confirmation,
+    }
+
+    if confirmation_prompt:
+        tool_kwargs["confirmation_prompt"] = confirmation_prompt
+
+    try:
+        return FunctionTool(**tool_kwargs)
+    except TypeError as e:
+        # Back-compat for ADK versions that don't accept `confirmation_prompt`.
+        if confirmation_prompt and "confirmation_prompt" in str(e):
+            import functools
+
+            @functools.wraps(func)
+            def _wrapped(*args, **kwargs):
+                return func(*args, **kwargs)
+
+            existing_doc = (getattr(func, "__doc__", "") or "").rstrip()
+            extra = (
+                "\n\nCONFIRMATION PROMPT:\n"
+                f"{confirmation_prompt.strip()}\n"
+            )
+            _wrapped.__doc__ = (existing_doc + extra) if existing_doc else extra.strip()
+
+            tool_kwargs.pop("confirmation_prompt", None)
+            tool = FunctionTool(**tool_kwargs | {"func": _wrapped})
+            setattr(tool, "confirmation_prompt", confirmation_prompt)
+            return tool
+
+        raise
 
 # Schema analysis tools
 get_source_schema_tool = FunctionTool(func=get_source_schema)
 get_target_schema_tool = FunctionTool(func=get_target_schema)
-get_sample_data_tool = FunctionTool(func=get_sample_data)
 
 # Mapping tools
 suggest_column_mappings_tool = FunctionTool(func=suggest_column_mappings)
 
-# Approval tool with confirmation
-approve_mappings_tool = FunctionTool(
+# Approval tool - REQUIRES explicit user confirmation before execution
+approve_mappings_tool = _create_function_tool_compat(
     func=approve_mappings,
-    require_confirmation=False  # Confirmation is handled inside the function via request_confirmation
+    require_confirmation=False,
+    confirmation_prompt=(
+        "This is a human approval step. Reply with decision='approve' or decision='reject'. "
+        "If source_table/target_table are omitted, the most recent suggested mapping will be used."
+    ),
 )
 
 # Transformation tools
 generate_transformation_sql_tool = FunctionTool(func=generate_transformation_sql)
-execute_transformation_tool = FunctionTool(
+execute_transformation_tool = _create_function_tool_compat(
     func=execute_transformation,
-    require_confirmation=True  # Require confirmation before executing SQL
+    require_confirmation=False,
+    confirmation_prompt=(
+        "Safety gate: run with dry_run=True first to get an execution_token, then confirm execution by "
+        "calling again with dry_run=False and execution_token=<token>."
+    ),
 )
+
+# Audit log tools
+get_audit_logs_tool = FunctionTool(func=get_audit_logs)
