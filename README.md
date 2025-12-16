@@ -91,7 +91,7 @@ AIMagna addresses these challenges through:
 
 ## Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                     AIMagna Data Integration System                      │
 ├─────────────────────────────────────────────────────────────────────────┤
